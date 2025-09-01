@@ -1,5 +1,4 @@
 version: "3.9"
-
 services:
   mongo:
     image: mongo:6
@@ -8,31 +7,34 @@ services:
       - mongo-data:/data/db
 
   backend:
-    build: ./server
-    env_file:
-      - ./server/.env
-      - ./.release.env # <-- so /api/health can show COMMIT
+    build: ./server   # 如果你要用現成的 image，可以換成 image: winter715/app-backend:1.0
     ports:
       - "3000:3000"
     depends_on:
       - mongo
     restart: unless-stopped
+    environment:
+      - PORT=3000
+      - MONGO_URI=mongodb://mongo:27017/rmit_database
+      - JWT_SECRET=my_secret_string
+      - CLIENT_URL=http://34.235.156.255:8080
+      - BASE_API_URL=api
     healthcheck:
-      test: [ "CMD-SHELL", "curl -f http://127.0.0.1:3000/api/category/list || exit 1" ]
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:3000/api/category/list || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 12
       start_period: 10s
 
   frontend:
-    build:
-      context: ./client
-    env_file:
-      - ./client/.env
+    build: ./client   # 如果你要用現成的 image，可以換成 image: winter715/app-frontend
     ports:
       - "8080:80"
     depends_on:
       - backend
+    environment:
+      - API_URL=http://34.235.156.255:3000/api
 
 volumes:
   mongo-data:
+
