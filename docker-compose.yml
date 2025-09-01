@@ -1,3 +1,4 @@
+version: "3.9"
 services:
   mongo:
     image: mongo:6
@@ -38,7 +39,7 @@ services:
     build: ./server
     command: ["npm", "run", "seed:db", "admin@rmit.edu.vn", "mypassword"]
     depends_on:
-      - backend
+      - mongo
     environment:
       - MONGO_URI=mongodb://mongo:27017/rmit_database
     restart: "no"
