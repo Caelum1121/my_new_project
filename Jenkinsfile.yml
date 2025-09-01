@@ -1,0 +1,334 @@
+pipeline {
+  agent any
+
+  environment {
+    EMAIL_TO = 'S4073761@rmit.edu.vn'
+
+    // ---- Branch to deploy ----
+    BRANCH = 'main'
+
+    // ---- Hosts (SSH) ----
+    STAGING_HOST = 'dockeradmin@52.201.227.137'
+    PROD_HOST    = 'dockeradmin@54.174.112.183'
+    SSH_CREDS    = 'deploy-ssh-key'
+
+    // ---- Remote layout ----
+    WORKDIR = '/opt/app'
+
+    // ---- Compose files (hyphenated) ----
+    COMPOSE_FILES_STAGING = '-f docker-compose.yml -f docker-compose-staging.yml'
+    COMPOSE_FILES_PROD    = '-f docker-compose.yml -f docker-compose-prod.yml'
+    COMPOSE_PROJECT_STAGING = 'mern_staging'
+    COMPOSE_PROJECT_PROD    = 'mern_prod'
+
+    // ---- Health checks ----
+    STAGING_HEALTH_URL = 'http://52.201.227.137/api/health'
+    STAGING_API_PING   = 'http://52.201.227.137/api/ping'
+    PROD_HEALTH_URL    = 'http://54.174.112.183/api/health'
+
+    // ---- Seed credentials ----
+    SEED_EMAIL    = 'admin@rmit.edu.vn'
+    SEED_PASSWORD = 'mypassword'
+
+    // ---- Traceability (will be set after checkout) ----
+    COMMIT = "${env.BUILD_NUMBER}"
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout([
+          $class: 'GitSCM',
+          branches: [[name: "*/${env.BRANCH}"]],
+          userRemoteConfigs: [[
+            url: 'git@github.com:RMIT-Vietnam-Teaching/cosc2767-assignment-2-2025b-hello_world.git',
+            credentialsId: 'ssh-key-github'
+          ]]
+        ])
+        script {
+          env.GIT_COMMIT = sh(returnStdout: true, script: 'git rev-parse --short=12 HEAD').trim()
+          env.COMMIT     = env.GIT_COMMIT
+        }
+        echo "Checked out ${env.GIT_COMMIT}"
+      }
+    }
+
+    stage('(Optional) Build & Unit Tests') {
+      steps {
+        sh '''#!/usr/bin/env bash
+          set -e
+          echo "Add real tests/build here if you have them."
+          # (cd server && npm ci && npm test --if-present)
+          # (cd client && npm ci && npm run build)
+        '''
+      }
+      post {
+        failure {
+          emailext(
+            to: env.EMAIL_TO,
+            subject: "❌ BUILD/TEST FAILED — ${env.JOB_NAME} #${env.BUILD_NUMBER} (${env.COMMIT})",
+            body: """<p>Build or tests failed in stage: <b>(Optional) Build & Unit Tests</b>.</p>
+                     <p><b>Job:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}<br/>
+                     <b>Commit:</b> ${env.COMMIT}<br/>
+                     <b>Console:</b> <a href="${env.BUILD_URL}console">${env.BUILD_URL}console</a></p>""",
+            mimeType: 'text/html',
+            attachLog: true, compressLog: true
+          )
+        }
+      }
+    }
+
+    stage('Package Artifact') {
+      steps {
+        sh '''#!/usr/bin/env bash
+          set -e
+          rm -f artifact.tar.gz
+          # Package exactly what is in HEAD (includes .env files)
+          git archive --format=tar HEAD | gzip -9 > artifact.tar.gz
+          # Record the commit we built
+          git rev-parse --short=12 HEAD > .release_commit
+        '''
+        archiveArtifacts artifacts: 'artifact.tar.gz,.release_commit', fingerprint: true
+      }
+    }
+
+    stage('Deploy → STAGING') {
+      steps {
+        sshagent (credentials: [env.SSH_CREDS]) {
+          sh '''#!/usr/bin/env bash
+            set -e
+            ssh -o StrictHostKeyChecking=no "$STAGING_HOST" "mkdir -p $WORKDIR"
+            scp -o StrictHostKeyChecking=no artifact.tar.gz "$STAGING_HOST:$WORKDIR/"
+
+            ssh -o StrictHostKeyChecking=no "$STAGING_HOST" "
+              set -e
+              cd $WORKDIR
+              tar -xzf artifact.tar.gz
+
+              # traceability for /api/health
+              echo COMMIT=$COMMIT > .release.env
+
+              export COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_STAGING
+
+              # Clean old containers (free ports) then start
+              docker-compose $COMPOSE_FILES_STAGING down --remove-orphans || true
+              docker-compose $COMPOSE_FILES_STAGING up -d --build
+
+              # Wait for backend to be healthy before seeding
+              cid=\\$(docker-compose $COMPOSE_FILES_STAGING ps -q backend)
+              if [ -n \\\"\\$cid\\\" ]; then
+                echo \\\"Waiting for backend to be healthy before seeding ...\\\"
+                for i in \\$(seq 1 24); do
+                  status=\\$(docker inspect --format='{{.State.Health.Status}}' \\\"\\$cid\\\" 2>/dev/null || echo unknown)
+                  [ \\\"\\$status\\\" = \\\"healthy\\\" ] && break
+                  sleep 5
+                done
+              fi
+
+              # Seed ONCE per server (remove .seeded.staging to reseed)
+              if [ ! -f .seeded.staging ]; then
+                echo \\\"Seeding staging database ...\\\"
+                docker-compose $COMPOSE_FILES_STAGING exec -T backend \\
+                  npm run seed:db -- $SEED_EMAIL $SEED_PASSWORD
+                touch .seeded.staging
+              else
+                echo \\\"Skipping seed: .seeded.staging exists\\\"
+              fi
+
+              docker image prune -f || true
+            "
+          '''
+        }
+      }
+      post {
+        failure {
+          emailext(
+            to: env.EMAIL_TO,
+            subject: "❌ STAGING DEPLOY FAILED — ${env.JOB_NAME} #${env.BUILD_NUMBER} (${env.COMMIT})",
+            body: """<p>Deployment to <b>staging (98.81.241.20)</b> failed.</p>
+                     <p><a href="${env.BUILD_URL}console">View console log</a></p>""",
+            mimeType: 'text/html',
+            attachLog: true, compressLog: true
+          )
+        }
+      }
+    }
+
+    stage('Smoke Test STAGING') {
+      steps {
+        sh '''#!/usr/bin/env bash
+          set -e
+          echo "Waiting for STAGING to be healthy ..."
+          attempts=0
+          until curl -fsS "$STAGING_HEALTH_URL" >/dev/null; do
+            attempts=$((attempts+1))
+            if [ $attempts -gt 24 ]; then
+              echo "❌ Staging /api/health failed after ~2 minutes."
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "✅ STAGING /api/health OK"
+
+          if [ -n "$STAGING_API_PING" ]; then
+            curl -fsS "$STAGING_API_PING" | tee /dev/stderr | grep -i -E "ok|pong|healthy" >/dev/null || {
+              echo "❌ STAGING /api/ping did not return expected token."
+              exit 1
+            }
+            echo "✅ STAGING /api/ping OK"
+          fi
+        '''
+      }
+      post {
+        failure {
+          emailext(
+            to: env.EMAIL_TO,
+            subject: "❌ STAGING SMOKE TEST FAILED — ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+            body: """<p>Health/ping checks failed on <b>staging</b>.</p>
+                     <p><a href="${env.BUILD_URL}console">View console log</a></p>""",
+            mimeType: 'text/html',
+            attachLog: true, compressLog: true
+          )
+        }
+      }
+    }
+
+    stage('Promote → PRODUCTION') {
+      steps {
+        sshagent (credentials: [env.SSH_CREDS]) {
+          sh '''#!/usr/bin/env bash
+            set -e
+            ssh -o StrictHostKeyChecking=no "$PROD_HOST" "mkdir -p $WORKDIR"
+            scp -o StrictHostKeyChecking=no artifact.tar.gz "$PROD_HOST:$WORKDIR/"
+
+            ssh -o StrictHostKeyChecking=no "$PROD_HOST" "
+              set -e
+              cd $WORKDIR
+              tar -xzf artifact.tar.gz
+
+              echo COMMIT=$COMMIT > .release.env
+
+              export COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_PROD
+
+              docker-compose $COMPOSE_FILES_PROD down --remove-orphans || true
+              docker-compose $COMPOSE_FILES_PROD up -d --build
+
+              # Wait for backend to be healthy before seeding
+              cid=\\$(docker-compose $COMPOSE_FILES_PROD ps -q backend)
+              if [ -n \\\"\\$cid\\\" ]; then
+                echo \\\"Waiting for backend to be healthy before seeding ...\\\"
+                for i in \\$(seq 1 24); do
+                  status=\\$(docker inspect --format='{{.State.Health.Status}}' \\\"\\$cid\\\" 2>/dev/null || echo unknown)
+                  [ \\\"\\$status\\\" = \\\"healthy\\\" ] && break
+                  sleep 5
+                done
+              fi
+
+              # Seed ONCE per server (remove .seeded.prod to reseed)
+              if [ ! -f .seeded.prod ]; then
+                echo \\\"Seeding production database ...\\\"
+                docker-compose $COMPOSE_FILES_PROD exec -T backend \\
+                  npm run seed:db -- $SEED_EMAIL $SEED_PASSWORD
+                touch .seeded.prod
+              else
+                echo \\\"Skipping seed: .seeded.prod exists\\\"
+              fi
+
+              docker image prune -f || true
+            "
+          '''
+        }
+      }
+      post {
+        failure {
+          emailext(
+            to: env.EMAIL_TO,
+            subject: "❌ PRODUCTION DEPLOY FAILED — ${env.JOB_NAME} #${env.BUILD_NUMBER} (${env.COMMIT})",
+            body: """<p>Deployment to <b>production (44.201.233.213)</b> failed.</p>
+                     <p><a href="${env.BUILD_URL}console">View console log</a></p>""",
+            mimeType: 'text/html',
+            attachLog: true, compressLog: true
+          )
+        }
+      }
+    }
+
+    stage('Verify PRODUCTION') {
+      steps {
+        sh '''#!/usr/bin/env bash
+          set -e
+          echo "Verifying PRODUCTION ..."
+          attempts=0
+          until curl -fsS "$PROD_HEALTH_URL" >/dev/null; do
+            attempts=$((attempts+1))
+            if [ $attempts -gt 24 ]; then
+              echo "❌ Production /api/health failed after ~2 minutes."
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "✅ PRODUCTION healthy at $PROD_HEALTH_URL"
+        '''
+      }
+      post {
+        failure {
+          emailext(
+            to: env.EMAIL_TO,
+            subject: "❌ PRODUCTION VERIFY FAILED — ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+            body: """<p>Production health check failed.</p>
+                     <p><a href="${env.BUILD_URL}console">View console log</a></p>""",
+            mimeType: 'text/html',
+            attachLog: true, compressLog: true
+          )
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      emailext(
+        to: env.EMAIL_TO,
+        subject: "✅ SUCCESS — ${env.JOB_NAME} #${env.BUILD_NUMBER} (${env.COMMIT})",
+        body: """<p>Pipeline completed successfully.</p>
+                 <p><b>Staging:</b> 98.81.241.20<br/>
+                 <b>Production:</b> 44.201.233.213</p>
+                 <p><b>Job:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}<br/>
+                 <b>Console:</b> <a href="${env.BUILD_URL}console">${env.BUILD_URL}console</a></p>""",
+        mimeType: 'text/html'
+      )
+    }
+    unstable {
+      emailext(
+        to: env.EMAIL_TO,
+        subject: "⚠️ UNSTABLE — ${env.JOB_NAME} #${env.BUILD_NUMBER} (${env.COMMIT})",
+        body: """<p>Build is <b>UNSTABLE</b> (e.g., failing tests).</p>
+                 <p><a href="${env.BUILD_URL}console">View console log</a></p>""",
+        mimeType: 'text/html',
+        attachLog: true, compressLog: true
+      )
+    }
+    failure {
+      emailext(
+        to: env.EMAIL_TO,
+        subject: "❌ FAILED — ${env.JOB_NAME} #${env.BUILD_NUMBER} (${env.COMMIT})",
+        body: """<p>The pipeline failed.</p>
+                 <p><a href="${env.BUILD_URL}console">View console log</a></p>""",
+        mimeType: 'text/html',
+        attachLog: true, compressLog: true
+      )
+    }
+    aborted {
+      emailext(
+        to: env.EMAIL_TO,
+        subject: "🛑 ABORTED — ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+        body: """<p>The pipeline was aborted.</p>
+                 <p><a href="${env.BUILD_URL}console">View console log</a></p>""",
+        mimeType: 'text/html'
+      )
+    }
+    always {
+      cleanWs(deleteDirs: true, notFailBuild: true)
+    }
+  }
+}

@@ -1,0 +1,20 @@
+[
+  {
+    "imageUrl": "/images/banners/banner-1.jpg",
+    "link": "/",
+    "title": "Holiday Specials",
+    "content": "<p>Celebrate the season with amazing discounts on your favorite products. Limited time only!</p>\n"
+  },
+  {
+    "imageUrl": "/images/banners/banner-2.png",
+    "link": "/",
+    "title": "Sustainable Living",
+    "content": "<p>Join our eco-friendly movement with products designed to help the planet.</p>\n"
+  },
+  {
+    "imageUrl": "/images/banners/banner-3.jpg",
+    "link": "/",
+    "title": "Tech Deals",
+    "content": "<p>Upgrade your tech game with unbeatable deals on gadgets and devices.</p>\n"
+  }
+]

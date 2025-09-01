@@ -1,0 +1,32 @@
+# Node modules
+node_modules
+
+# Logs
+npm-debug.log
+yarn-error.log
+*.log
+
+# Coverage / build artifacts
+coverage
+dist
+
+# Git
+.git
+.gitignore
+
+# Docker
+.dockerignore
+Dockerfile*
+
+# Environment / secrets
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

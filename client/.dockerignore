@@ -1,0 +1,30 @@
+# Node modules
+node_modules
+
+# Build outputs
+build
+dist
+coverage
+
+# Logs
+npm-debug.log
+yarn-error.log
+*.log
+
+# Environment files
+.env
+.env.*.local
+
+# Git
+.git
+.gitignore
+
+# Docker
+.dockerignore
+Dockerfile*
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

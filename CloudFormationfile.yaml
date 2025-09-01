@@ -1,0 +1,240 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DevOps Project - Jenkins + Docker Swarm + ECR (AWS Academy Version) - Amazon Linux 2023
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair to enable SSH access
+    Default: "" # Allow empty if using SSM
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: Latest Amazon Linux 2023 AMI
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+
+Resources:
+  # ------------------------- 
+  # Security Groups (Separated)
+  # ------------------------- 
+
+  # Base Security Group - For all instances
+  BaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH, Jenkins, HTTP for all instances
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0 # SSH open to world
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0 # Jenkins open to world
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0 # HTTP open to world
+
+  # Swarm Security Group - For Docker Swarm internal communication
+  SwarmSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Docker Swarm internal communication only
+
+  # Separate Ingress Rules for SwarmSecurityGroup
+  SwarmSecurityGroupIngressTCP2377:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt SwarmSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 2377
+      ToPort: 2377
+      SourceSecurityGroupId: !GetAtt SwarmSecurityGroup.GroupId
+
+  SwarmSecurityGroupIngressTCP7946:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt SwarmSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 7946
+      ToPort: 7946
+      SourceSecurityGroupId: !GetAtt SwarmSecurityGroup.GroupId
+
+  SwarmSecurityGroupIngressUDP7946:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt SwarmSecurityGroup.GroupId
+      IpProtocol: udp
+      FromPort: 7946
+      ToPort: 7946
+      SourceSecurityGroupId: !GetAtt SwarmSecurityGroup.GroupId
+
+  SwarmSecurityGroupIngressUDP4789:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt SwarmSecurityGroup.GroupId
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+      SourceSecurityGroupId: !GetAtt SwarmSecurityGroup.GroupId
+
+  # ------------------------- 
+  # EC2 Instances
+  # ------------------------- 
+
+  # Jenkins Instance (uses only BaseSecurityGroup)
+  JenkinsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.small
+      ImageId: !Ref LatestAmiId
+      KeyName: !If [HasKey, !Ref KeyName, !Ref "AWS::NoValue"]
+      SecurityGroups:
+        - !Ref BaseSecurityGroup
+      Tags:
+        - Key: Name
+          Value: Jenkins-Server
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -ex
+          # Install Docker on Amazon Linux 2023
+          dnf install -y docker
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ec2-user
+          
+          # Install Docker Compose
+          curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          
+          # 🔥 關鍵修復：等待 Docker 守護進程完全啟動並就緒
+          # 這段循環會持續嘗試，直到 `docker info` 命令成功執行
+          until docker info > /dev/null 2>&1; do
+          echo "Waiting for Docker daemon to start..."
+          sleep 2
+          done
+          echo "Docker daemon is now running!"
+          
+          # 創建 Jenkins 數據目錄並設置正確權限 (防止權限錯誤)
+          mkdir -p /var/jenkins_home
+          chown -R 1000:1000 /var/jenkins_home
+          
+          # Run Jenkins in Docker
+          docker run -d --name jenkins -p 8080:8080 -p 50000:50000 \
+          -v /var/jenkins_home:/var/jenkins_home \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          --restart=unless-stopped \  # 🔥 添加重啟策略，增強可靠性
+          jenkins/jenkins:lts-jdk11
+          
+          # Install AWS CLI for ECR access in pipeline
+          dnf install -y unzip
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          ./aws/install
+
+  # Docker Swarm Manager (uses Base + Swarm security groups)
+  DockerManagerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref LatestAmiId
+      KeyName: !If [HasKey, !Ref KeyName, !Ref "AWS::NoValue"]
+      SecurityGroups:
+        - !Ref BaseSecurityGroup
+        - !Ref SwarmSecurityGroup
+      Tags:
+        - Key: Name
+          Value: Docker-Swarm-Manager
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -ex
+          # Install Docker on Amazon Linux 2023
+          dnf install -y docker
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ec2-user
+          
+          # Install Docker Compose
+          curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          
+          # Wait for docker to be ready
+          until docker info > /dev/null 2>&1; do sleep 1; done
+          
+          # Initialize Swarm
+          MANAGER_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+          docker swarm init --advertise-addr $MANAGER_IP
+          
+          # Get worker join token
+          JOIN_TOKEN=$(docker swarm join-token -q worker)
+          FULL_CMD="docker swarm join --token $JOIN_TOKEN $MANAGER_IP:2377"
+          
+          echo "Worker join command: $FULL_CMD"
+          echo "Run this command on worker nodes to join the swarm"
+
+  # Docker Swarm Worker (uses Base + Swarm security groups)
+  DockerWorkerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref LatestAmiId
+      KeyName: !If [HasKey, !Ref KeyName, !Ref "AWS::NoValue"]
+      SecurityGroups:
+        - !Ref BaseSecurityGroup
+        - !Ref SwarmSecurityGroup
+      Tags:
+        - Key: Name
+          Value: Docker-Swarm-Worker
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -ex
+          # Install Docker on Amazon Linux 2023
+          dnf install -y docker
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ec2-user
+          
+          # Install Docker Compose
+          curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          
+          # Wait for docker to be ready
+          until docker info > /dev/null 2>&1; do sleep 1; done
+          
+          echo "Please SSH into the manager node and run 'docker swarm join-token worker' to get the join command"
+          echo "Then manually run the join command on this worker node"
+
+  # ------------------------- 
+  # ECR Repositories
+  # ------------------------- 
+  FrontendECR:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: frontend
+      ImageTagMutability: MUTABLE
+
+  BackendECR:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: backend
+      ImageTagMutability: MUTABLE
+
+Outputs:
+  JenkinsURL:
+    Description: Jenkins Web URL (Wait a few minutes for startup)
+    Value: !Sub "http://${JenkinsInstance.PublicDnsName}:8080"
+  ManagerPublicIP:
+    Description: Docker Swarm Manager Public IP (For SSH/Management)
+    Value: !GetAtt DockerManagerInstance.PublicIp
+  FrontendRepo:
+    Description: Frontend ECR Repository URI
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/frontend"
+  BackendRepo:
+    Description: Backend ECR Repository URI
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/backend"
+
+Conditions:
+  HasKey: !Not [!Equals [!Ref KeyName, ""]]

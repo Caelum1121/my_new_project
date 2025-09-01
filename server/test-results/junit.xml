@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="jest tests" tests="6" failures="0" errors="0" time="0.911">
+  <testsuite name="business logic (unit)" errors="0" failures="0" skipped="0" timestamp="2025-08-28T02:36:30" time="0.744" tests="6">
+    <testcase classname="business logic (unit) disableProducts() calls Product.bulkWrite with expected ops" name="business logic (unit) disableProducts() calls Product.bulkWrite with expected ops" time="0.01" file="tests\unit\order_logic.test.js">
+    </testcase>
+    <testcase classname="business logic (unit) caculateOrderTotal() sums only non-cancelled totalPrice" name="business logic (unit) caculateOrderTotal() sums only non-cancelled totalPrice" time="0.002" file="tests\unit\order_logic.test.js">
+    </testcase>
+    <testcase classname="business logic (unit) caculateTaxAmount() (5%) computes per-item + order totals" name="business logic (unit) caculateTaxAmount() (5%) computes per-item + order totals" time="0.004" file="tests\unit\order_logic.test.js">
+    </testcase>
+    <testcase classname="business logic (unit) caculateTaxAmount() ignores Cancelled items for order.total" name="business logic (unit) caculateTaxAmount() ignores Cancelled items for order.total" time="0.002" file="tests\unit\order_logic.test.js">
+    </testcase>
+    <testcase classname="business logic (unit) caculateItemsSalesTax() calculates per-item totals at 5%" name="business logic (unit) caculateItemsSalesTax() calculates per-item totals at 5%" time="0.002" file="tests\unit\order_logic.test.js">
+    </testcase>
+    <testcase classname="business logic (unit) caculateTaxAmount() handles empty products array" name="business logic (unit) caculateTaxAmount() handles empty products array" time="0.002" file="tests\unit\order_logic.test.js">
+    </testcase>
+  </testsuite>
+</testsuites>

@@ -1,0 +1,21 @@
+# docker-compose-prod.yml  (override)
+services:
+  mongo:
+    volumes:
+      - mongo-data-prod:/data/db
+
+  backend:
+    env_file:
+      - ./server/.env.prod # lives on the PROD host; we never ship/overwrite it
+      - ./.release.env # written by the pipeline (COMMIT=...)
+    environment:
+      NODE_ENV: "production"
+
+  frontend:
+    environment:
+      NODE_ENV: "production"
+    ports:
+      - "80:80"
+
+volumes:
+  mongo-data-prod:

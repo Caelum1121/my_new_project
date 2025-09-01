@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  mongo:
+    # separate volume name is optional since staging is on its own EC2
+    volumes:
+      - mongo-data-staging:/data/db
+
+  backend:
+    environment:
+      NODE_ENV: "staging"
+      # If you keep different env files per env:
+      # (uncomment this and create ./server/.env.staging on the staging server)
+      # MONGO_URL will override what's in env_file
+      # MONGO_URL: "${MONGO_URL_STAGING}"
+    # If you prefer a separate env file per env on the server, uncomment:
+    env_file:
+      - ./server/.env.staging
+    ports:
+      - "3000:3000" # keep same port on staging
+
+  frontend:
+    environment:
+      NODE_ENV: "staging"
+      # If your FE needs API URL at build time (React):
+      # REACT_APP_API_URL: "http://localhost:3000"
+    # You can expose staging on 80 if you like:
+    ports:
+      - "80:80" # expose at http://<staging-ip>/
+      # - "8080:80"    # (or keep 8080 if you prefer)
+volumes:
+  mongo-data-staging:
